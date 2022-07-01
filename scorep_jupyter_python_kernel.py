@@ -1,18 +1,26 @@
+from distutils.log import info
 import cubex
 from ipykernel.kernelbase import Kernel
 from ipykernel.ipkernel import IPythonKernel
 from subprocess import Popen, PIPE
 import os
+
+from torch import sign
 import userpersistence
+from userpersistence import PersistenceHandler
 import uuid
 from time import sleep
 from threading import Thread
 import signal
 import subprocess
 import sys
+from multiprocessing import shared_memory
+import base64
+import dill
+import logging
+from datetime import datetime
 
-PYTHON_EXECUTABLE = ""
-
+PYTHON_EXECUTABLE = "/home/visitor/virtualenv_jupyterkernel_scorep_python/bin/python"
 
 # Exception to throw when reading data from stdout/stderr of subprocess
 class MyTimeoutException(Exception):
@@ -45,19 +53,21 @@ class ScorepPythonKernel(Kernel):
     multicellmode = False
     init_multicell = False
     multicellmode_cellcount = 0
-    tmpCodeFile = ""
-    tmpUserPers = ""
-    tmpUserVars = ""
+    kernel_uid = ""
+    tmp_code_string = ""
+    persistencehandler = None
+
 
     def __init__(self, **kwargs):
         Kernel.__init__(self, **kwargs)
         uid = str(uuid.uuid4())
-        self.tmpCodeFile = ".tmpCodeFile" + uid + ".py"
-        self.tmpUserPers = "tmpUserPers" + uid + ".py"
-        self.tmpUserVars = ".tmpUserVars" + uid
+        self.kernel_uid = uid
         self.userEnv["PYTHONUNBUFFERED"] = "x"
+        logging.basicConfig(filename='kernel_log.log', encoding='utf-8', level=logging.DEBUG)
+        self.persistencehandler = PersistenceHandler(self.kernel_uid)
 
     def get_output_and_print(self, process2observe):
+
         while True:
             err = b''
             output = b''
@@ -74,6 +84,20 @@ class ScorepPythonKernel(Kernel):
                     output += process2observe.stdout.readline(1)
             except MyTimeoutException:
                 pass
+
+            signal.setitimer(signal.ITIMER_REAL, signal_timeout)
+            
+            tmp_check = False
+            try:
+                while tmp_check == False:
+                    tmp_check = self.persistencehandler.check_communication_shm(self.kernel_uid)
+                    if tmp_check:
+                        signal.setitimer(signal.ITIMER_REAL, 0)
+                        self.persistencehandler.read_shared_memory_vars(self.kernel_uid)
+                        break
+            except MyTimeoutException:
+                pass                
+            
             if process2observe.poll() is not None and output == b'' and err == b'':
                 break
             if output:
@@ -111,10 +135,6 @@ class ScorepPythonKernel(Kernel):
         # start with internal profiling mode
         # self.manage_profiling_commands(code)
         elif code.startswith('%%enable_multicellmode'):
-            # start to mark the cells for multi cell mode
-            if os.path.exists(self.tmpCodeFile):
-                # ensure to start with a clean file in multi cell mode
-                os.remove(self.tmpCodeFile)
             self.multicellmode = True
             self.multicellmode_cellcount = 0
             self.init_multicell = True
@@ -135,32 +155,41 @@ class ScorepPythonKernel(Kernel):
             self.multicellmode = False
             self.init_multicell = False
             self.multicellmode_cellcount = 0
-            cell_code_file = open(self.tmpCodeFile, "r")
-            # read the defined code to save it
-            code = cell_code_file.read()
-            cell_code_file.close()
-            user_variables = userpersistence.get_user_variables_from_code(code)
+            user_variables = self.persistencehandler.get_user_variables_from_code(code)
             # add ordinary userpersistence handling (as in normal mode)
-            cell_code_file = open(self.tmpCodeFile, "w")
-            cell_code_file.write("import userpersistence\n")
+            cell_code_string = ""
+            cell_code_string = cell_code_string + "\nimport userpersistence\n"
             # cell_code_file.write("from tmp_userpersistence import *\n")
-            if os.path.isfile(self.tmpUserPers):
-                with open(self.tmpUserPers, "r") as f:
-                    prev_userpersistence = f.read()
-                    cell_code_file.write(prev_userpersistence + "\n")
-            cell_code_file.write("globals().update(userpersistence.load_user_variables('" + self.tmpUserVars + "'))\n")
-            cell_code_file.write(code)
+            # TODO bind in shared memory
+            if self.persistencehandler.shm_tmp_user_pers:
+                existing_tmp_code_shm_user_pers = shared_memory.SharedMemory('tmp_user_pers_shm_'+ self.kernel_uid)
+                decoded_res_bytes = base64.b64decode(bytes(existing_tmp_code_shm_user_pers.buf))
+                prev_userpersistence = dill.loads(decoded_res_bytes)
+                cell_code_string = cell_code_string + prev_userpersistence + "\n"
+                existing_tmp_code_shm_user_pers.close()
 
-            cell_code_file.write("\nuserpersistence.save_user_variables(globals(), " + str(user_variables) + ", '" +
-                                 self.tmpUserPers + "', '" + self.tmpUserVars + "')")
-            cell_code_file.close()
+            cell_code_string = cell_code_string + "globals().update(userpersistence.load_user_variables('" + self.kernel_uid + "'))\n"
+            cell_code_string = cell_code_string + code
+            cell_code_string = cell_code_string + "\nuserpersistence.save_user_variables(globals(), " + str(user_variables) + ", '" + self.kernel_uid + "')"
+            self.tmp_code_string = self.tmp_code_string + cell_code_string
+            #res_bytes = dill.dumps(cell_code_string)
+            #output_byte = base64.b64encode(res_bytes)
 
-            userpersistence.save_user_definitions(code, self.tmpUserPers)
+            #tmp_code_shm = shared_memory.SharedMemory(name="tmp_code_shm_"+ self.kernel_uid ,create=True, size=len(output_byte))
+            #tmp_code_shm.buf[:len(output_byte)] = output_byte
 
+
+            self.persistencehandler.save_user_definitions(code, self.kernel_uid)
             user_code_process = subprocess.Popen(
-                [PYTHON_EXECUTABLE, "-m", "scorep", self.scoreP_python_args, self.tmpCodeFile], stdout=PIPE,
-                stderr=PIPE,
+                [PYTHON_EXECUTABLE, "-m", "scorep", self.scoreP_python_args, '-c', self.tmp_code_string], stdout=PIPE,
+                stderr=PIPE, 
                 env=os.environ.update(self.userEnv))
+
+            dt = datetime.now()
+            ts = datetime.timestamp(dt)
+            #print(self.tmp_code_string, "timestamp: " + str(ts))
+            #logging.info(self.tmp_code_string, "timestamp: " + str(ts))
+
             if not silent:
                 self.get_output_and_print(user_code_process)
 
@@ -172,27 +201,31 @@ class ScorepPythonKernel(Kernel):
             if self.multicellmode:
                 # in multi cell mode, just append the code because we execute multiple cells as one
                 self.multicellmode_cellcount += 1
-                cell_code = open(self.tmpCodeFile, "a")
             else:
                 # if we do not use scorep or multi cell mode, just remove the content and write to the file
-                cell_code = open(self.tmpCodeFile, "w")
+                cell_code_string = ""
 
             # import variables defined so far
             if not self.multicellmode:
                 # all cells that are not executed in multi cell mode have to import them
-                cell_code.write("import userpersistence\n")
+                cell_code_string = cell_code_string + "\nimport userpersistence\n"
                 # prior imports can be loaded before runtime. we have to load them this way because they can not be
                 # pickled
 
                 # user variables can be pickled and should be loaded at runtime
-                if os.path.isfile(self.tmpUserPers):
-                    with open(self.tmpUserPers, "r") as f:
-                        prev_userpersistence = f.read()
-                        cell_code.write(prev_userpersistence + "\n")
-                cell_code.write("globals().update(userpersistence.load_user_variables('" + self.tmpUserVars + "'))\n")
+                #TODO bind shared memory
+                if self.persistencehandler.shm_tmp_user_pers is not None:
+                    existing_tmp_code_shm_user_pers = shared_memory.SharedMemory('tmp_user_pers_shm_'+ self.kernel_uid)
+                    decoded_res_bytes = base64.b64decode(bytes(existing_tmp_code_shm_user_pers.buf))
+                    prev_userpersistence = dill.loads(decoded_res_bytes)
+                    cell_code_string = cell_code_string + prev_userpersistence + "\n"
+                    existing_tmp_code_shm_user_pers.close()
 
+                cell_code_string = cell_code_string + "globals().update(userpersistence.load_user_variables('" + self.kernel_uid + "'))\n"
+                #self.tmp_code_string = self.tmp_code_string + cell_code_string
             # add original cell code
-            cell_code.write("\n" + code)
+            cell_code_string = cell_code_string + "\n" + code
+            self.tmp_code_string = self.tmp_code_string + "\n"+ code
 
             # for persistence reasons, we have to store user defined variables after the execution of the cell.
             # therefore we use shelve/pickle for object serialization and object persistence imports, user defined
@@ -202,12 +235,11 @@ class ScorepPythonKernel(Kernel):
 
             if not self.multicellmode:
                 # in multi cell mode we call this mechanism in "finalize"
-                user_variables = userpersistence.get_user_variables_from_code(code)
-                cell_code.write("\nuserpersistence.save_user_variables(globals(), " + str(user_variables) + ", '" +
-                                self.tmpUserPers + "', '" + self.tmpUserVars + "')")
-
-            cell_code.close()
-            userpersistence.save_user_definitions(code, self.tmpUserPers)
+                user_variables = self.persistencehandler.get_user_variables_from_code(code)
+                cell_code_string = cell_code_string + "\nvars_state = userpersistence.save_user_variables(globals(), " + str(user_variables) +  ", '" + self.kernel_uid + "')\n"
+                cell_code_string = cell_code_string + "\nif vars_state:\n\tuserpersistence.attach_and_write_to_shm('tmp_communication_shm_"+self.kernel_uid+"')\n"
+                self.tmp_code_string = self.tmp_code_string + cell_code_string
+            self.persistencehandler.save_user_definitions(code, self.kernel_uid)
             if self.multicellmode:
                 # if we are in multi cell mode, do not execute here (wait for "finalize")
                 stream_content_stdout = {'name': 'stdout',
@@ -217,14 +249,33 @@ class ScorepPythonKernel(Kernel):
             else:
                 # execute cell with or without scorep
                 if execute_with_scorep:
+                    tmp_code_file = "tmp_code_file.py"
+                    code_file = open(tmp_code_file, "w")
+                    code_file.write(cell_code_string)
+                    code_file.close()
+                    self.persistencehandler.check_communication_shm(self.kernel_uid)
+                    
                     user_code_process = subprocess.Popen(
-                        [PYTHON_EXECUTABLE, "-m", "scorep", self.scoreP_python_args, self.tmpCodeFile], stdout=PIPE,
+                        [PYTHON_EXECUTABLE, "-m", "scorep", self.scoreP_python_args, tmp_code_file], stdout=PIPE,
                         stderr=PIPE,
                         env=os.environ.update(self.userEnv))
 
                 else:
-                    user_code_process = subprocess.Popen([PYTHON_EXECUTABLE, self.tmpCodeFile], stdout=PIPE,
-                                                         stderr=PIPE, env=os.environ.update(self.userEnv))
+                    dt = datetime.now()
+                    ts = datetime.timestamp(dt)
+                    tmp_not_scorep_code_file = "tmp_not_scorep_code_file.py"
+                    code_file = open(tmp_not_scorep_code_file, "w")
+                    code_file.write(cell_code_string)
+                    code_file.close()
+
+                    #print(self.tmp_code_string, "timestamp: " + str(ts))
+                    #self.persistencehandler.check_communication_shm(self.kernel_uid)
+
+                    logging.info(str(self.tmp_code_string) + " timestamp: "+ str(ts))
+                    user_code_process = subprocess.Popen(
+                        [PYTHON_EXECUTABLE, '-c', cell_code_string], stdout=PIPE,
+                        stderr=PIPE, 
+                        env=os.environ.update(self.userEnv))
 
                 if not silent:
                     self.get_output_and_print(user_code_process)
@@ -237,9 +288,7 @@ class ScorepPythonKernel(Kernel):
                 }
 
     def do_shutdown(self, restart):
-        if os.path.exists(self.tmpCodeFile):
-            os.remove(self.tmpCodeFile)
-        userpersistence.tidy_up(self.tmpUserPers, self.tmpUserVars)
+        self.persistencehandler.tidy_up()
 
         return {'status': 'ok',
                 'restart': restart

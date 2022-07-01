@@ -1,10 +1,12 @@
+from glob import glob
+import logging
 import os
 import ast
-import shelve
 import astunparse
-import inspect
-import shutil
 import dill
+from multiprocessing import shared_memory
+import base64
+from time import sleep
 
 '''
 Note: general limitation
@@ -13,64 +15,82 @@ this might be fixed by using shared memory
 '''
 
 
-def save_user_definitions(code, tmp_user_pers_file):
-    # keep imports, classes and definitions
-    root = ast.parse(code)
-    '''
-    code_curr = [node for node in ast.iter_child_nodes(root) if <isinstance(node, ast.FunctionDef) or
-                 isinstance(node, ast.AsyncFunctionDef) or isinstance(node, ast.ClassDef) or
-                 isinstance(node, ast.Import) or isinstance(node, ast.ImportFrom)]
-    '''
-    code_curr = []
-    for top_node in ast.iter_child_nodes(root):
-        if isinstance(top_node, ast.With):
-            for node in ast.iter_child_nodes(top_node):
-                if (isinstance(node, ast.FunctionDef) or isinstance(node, ast.AsyncFunctionDef) or
-                        isinstance(node, ast.ClassDef) or isinstance(node, ast.Import) or isinstance(node,
-                                                                                                     ast.ImportFrom)):
-                    code_curr.append(node)
-        elif (isinstance(top_node, ast.FunctionDef) or isinstance(top_node, ast.AsyncFunctionDef) or
-              isinstance(top_node, ast.ClassDef) or isinstance(top_node, ast.Import) or isinstance(top_node,
-                                                                                                   ast.ImportFrom)):
-            code_curr.append(top_node)
-    '''
-    # keep changed attributes (either assignments or expressions)
-    TODO: needs some more extensive handling to distinguish between modules and object instances
-    attributes = []
-    for node in ast.iter_child_nodes(root):
-        # assignment nodes can include attributes, therefore go over all targets and check for attribute nodes
-        if isinstance(node, ast.Assign) or isinstance(node, ast.AnnAssign):
-            for el in node.targets:
-                for target_node in ast.walk(el):
-                    if isinstance(target_node, ast.Attribute):
-                        attributes.append(node)
-                        break
-        elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-              and isinstance(node.value.func, ast.Attribute)):
-            # attributes can also be set via function calls
-            attributes.append(node)
 
-    code_curr.extend(attributes)
-    code_curr.sort(key=lambda node: node.lineno)
-    '''
-    code_curr_id = [node.name for node in code_curr if isinstance(node, ast.FunctionDef)
-                    or isinstance(node, ast.ClassDef)]
+class PersistenceHandler():
+    shm_tmp_user_pers = None
+    shm_tmp_user_vars = None
+    shm_tmp_communication = None
 
-    code_prev = []
-    if os.path.isfile(tmp_user_pers_file):
-        shutil.copyfile(tmp_user_pers_file, tmp_user_pers_file + "_backup")
-        with open(tmp_user_pers_file, "r") as f:
-            code_prev = [node for node in ast.iter_child_nodes(ast.parse(f.read()))]
 
-    # TODO: use shared memory
-    with open(tmp_user_pers_file, "w") as f:
+    def __init__(self, uid,  **kwargs):
+        res_bytes = dill.dumps(False)
+        output_byte = base64.b64encode(res_bytes)
+        #decode
+        #decoded_res_bytes = base64.b64decode(bytes(shm_tmp_user_vars.buf))
+        #decoded_output = dill.loads(decoded_res_bytes)
+        #print(decoded_output)
 
-        '''
-        import_nodes = [node.names for node in code_curr if isinstance(node, ast.Import)]
-        for import_smt in import_nodes:
-            for imp in import_smt:
-                code_curr_id.append(imp.name)
-        '''
+        self.shm_tmp_communication = shared_memory.SharedMemory(name="tmp_communication_shm_"+uid, create=True, size=len(output_byte))
+        self.shm_tmp_communication.buf[:len(output_byte)] = output_byte
+
+    def read_shared_memory_vars(self, uid):
+        self.shm_tmp_user_vars = shared_memory.SharedMemory(name="tmp_user_vars_shm_"+uid)
+        res_bytes = dill.dumps(False)
+        output_byte = base64.b64encode(res_bytes)
+        self.shm_tmp_communication = shared_memory.SharedMemory(name="tmp_communication_shm_"+uid)
+        self.shm_tmp_communication.buf[:len(output_byte)] = output_byte
+
+    def check_communication_shm(self, uid):
+       
+        if dill.loads(base64.b64decode(bytes(self.shm_tmp_communication.buf))) is not False:
+            logging.info("check communication shm succeeded")
+            return True
+        return False
+
+
+
+    #def read_shm_vars(self, uid):
+        #self.shm_tmp_user_vars = shared_memory.SharedMemory(name="tmp_user_vars_shm_"+uid)
+
+    
+    #tmp_user_pers_file ,must be unique name of tmp_user_pers_shm
+    def save_user_definitions(self, code, uid):
+        # keep imports, classes and definitions
+
+        root = ast.parse(code)
+        code_curr = []
+        for top_node in ast.iter_child_nodes(root):
+            if isinstance(top_node, ast.With):
+                for node in ast.iter_child_nodes(top_node):
+                    if (isinstance(node, ast.FunctionDef) or isinstance(node, ast.AsyncFunctionDef) or
+                            isinstance(node, ast.ClassDef) or isinstance(node, ast.Import) or isinstance(node,
+                                                                                                        ast.ImportFrom)):
+                        code_curr.append(node)
+            elif (isinstance(top_node, ast.FunctionDef) or isinstance(top_node, ast.AsyncFunctionDef) or
+                isinstance(top_node, ast.ClassDef) or isinstance(top_node, ast.Import) or isinstance(top_node,
+                                                                                                    ast.ImportFrom)):
+                code_curr.append(top_node)
+
+        code_curr_id = [node.name for node in code_curr if isinstance(node, ast.FunctionDef)
+                        or isinstance(node, ast.ClassDef)]
+
+
+        #get code prev from shared memory (name = tmp_user_pers_shm)
+        code_prev = []
+        #check if there is a filled shm yet and get prev code from it, decode it
+        if self.shm_tmp_user_pers is not None:
+            existing_shm_tmp_user_pers = shared_memory.SharedMemory(name='tmp_user_pers_shm_'+uid)
+            decoded_res_bytes = base64.b64decode(bytes(existing_shm_tmp_user_pers.buf))
+            decoded_output = dill.loads(decoded_res_bytes)
+            code_prev = [node for node in ast.iter_child_nodes(ast.parse(decoded_output))]
+            #tmp_user_pers_list.extend(code_prev)
+            existing_shm_tmp_user_pers.close()
+            self.shm_tmp_user_pers.close()
+            self.shm_tmp_user_pers.unlink()
+            self.shm_tmp_user_pers = None
+        # keep info in code prev and close the shm to open new resized shm with same name
+
+        # TODO: use shared memory
 
         code_to_keep = []
         for node in code_prev:
@@ -79,91 +99,111 @@ def save_user_definitions(code, tmp_user_pers_file):
             if not (isinstance(node, ast.FunctionDef) or isinstance(node, ast.ClassDef) or
                     isinstance(node, ast.AsyncFunctionDef)):
                 code_to_keep.append(node)
-            else:
+            else: 
                 if node.name not in code_curr_id:
                     code_to_keep.append(node)
         code_to_keep.append(code_curr)
 
+        tmp_user_pers_shm_string = ""
         for node in code_to_keep:
-            f.write(astunparse.unparse(node))
+            tmp_user_pers_shm_string = tmp_user_pers_shm_string + astunparse.unparse(node)
+
+        
+        res_bytes = dill.dumps(tmp_user_pers_shm_string)
+        output_byte = base64.b64encode(res_bytes)
+
+        self.shm_tmp_user_pers = shared_memory.SharedMemory(name='tmp_user_pers_shm_'+uid, create=True, size=len(output_byte))
+
+        self.shm_tmp_user_pers.buf[:len(output_byte)] = output_byte
+
+        #decode
+        #decoded_res_bytes = base64.b64decode(bytes(shm_tmp_user_pers.buf))
+        #decoded_output = dill.loads(decoded_res_bytes)
+        #tmp_user_pers_string = tmp_user_pers_string + decoded_output
 
 
-def get_user_variables_from_code(code):
-    # found variables might contain more variables because they contain also local variables
-    # note that local variables are filtered later by merging with globals()
-    root = ast.parse(code)
-    # variables = sorted({node.id for node in ast.walk(root) if isinstance(node, ast.Name)})
-    variables = set()
-    for node in ast.walk(root):
-        # assignment nodes can include attributes, therefore go over all targets and check for attribute nodes
-        if isinstance(node, ast.Assign) or isinstance(node, ast.AnnAssign):
-            for el in node.targets:
-                for target_node in ast.walk(el):
-                    if isinstance(target_node, ast.Name):
-                        variables.add(target_node.id)
+    def get_user_variables_from_code(self, code):
+        # found variables might contain more variables because they contain also local variables
+        # note that local variables are filtered later by merging with globals()
+        root = ast.parse(code)
+        # variables = sorted({node.id for node in ast.walk(root) if isinstance(node, ast.Name)})
+        variables = set()
+        for node in ast.walk(root):
+            # assignment nodes can include attributes, therefore go over all targets and check for attribute nodes
+            if isinstance(node, ast.Assign) or isinstance(node, ast.AnnAssign):
+                for el in node.targets:
+                    for target_node in ast.walk(el):
+                        if isinstance(target_node, ast.Name):
+                            variables.add(target_node.id)
 
-    return variables
-
-
-def save_user_variables(globs, variables, tmp_user_pers_file, tmp_user_vars_file):
-    # remove ".py" to retrieve the module name
-    tmp_user_pers_mod = str(tmp_user_pers_file[:-3])
-    # dynamically load user defined classes to make them available for variable/object storing
-
-    _tmp = __import__(tmp_user_pers_mod, globals(), locals(), ['*'], 0)
-    for member in inspect.getmembers(_tmp):
-        if not str(member[0]).startswith("__"):
-            globals()[member[0]] = member[1]
-
-    prior_variables = load_user_variables(tmp_user_vars_file)
-    user_variables = {k: v for k, v in globs.items() if str(k) in variables}
-    user_variables = {**prior_variables, **user_variables}
-    # TODO: use shared memory
-    if bool(user_variables):
-        with open(tmp_user_vars_file, "wb") as dill_file:
-            # d = shelve.open(tmp_user_vars_file)
-            for el in user_variables.keys():
-                # if possible, exchange class of the object here with the class that is stored for persistence. This is
-                # valid since the classes should be the same and this does not affect the objects attribute dictionary
-                non_persistent_class = user_variables[el].__class__.__name__
-                if non_persistent_class in globals().keys():
-                    user_variables[el].__class__ = globals()[non_persistent_class]
-                #d[el] = user_variables[el]
-            dill.dump(user_variables, dill_file)
-            #d.close()
+        return variables
 
 
-def restore_user_definitions(tmp_user_pers_file):
-    if os.path.isfile(tmp_user_pers_file):
-        os.remove(tmp_user_pers_file)
-    if os.path.isfile(tmp_user_pers_file + "_backup"):
-        os.rename(tmp_user_pers_file + "_backup", tmp_user_pers_file)
-
-
-def load_user_variables(tmp_user_vars_file):
-    user_variables = {}
-    # TODO: use shared memory
-    '''
-    d = shelve.open(tmp_user_vars_file)
-    klist = list(d.keys())
-    for key in klist:
-        user_variables[key] = d[key]
-    d.close()
-    '''
-    if os.path.isfile(tmp_user_vars_file):
-        with open(tmp_user_vars_file, "rb") as dill_file:
-            user_variables = dill.load(dill_file)
-
-    return user_variables
-
-
-def tidy_up(tmp_user_pers_file, tmp_user_vars_file):
-    try:
+    def restore_user_definitions(self, tmp_user_pers_file):
         if os.path.isfile(tmp_user_pers_file):
             os.remove(tmp_user_pers_file)
         if os.path.isfile(tmp_user_pers_file + "_backup"):
-            os.remove(tmp_user_pers_file + "_backup")
-        if os.path.isfile(tmp_user_vars_file):
-            os.remove(tmp_user_vars_file)
+            os.rename(tmp_user_pers_file + "_backup", tmp_user_pers_file)
+
+
+
+
+    def tidy_up(self):
+        try:
+            if self.shm_tmp_user_pers is not None:
+                self.shm_tmp_user_pers.close()
+                self.shm_tmp_user_pers.unlink()
+                self.shm_tmp_user_pers = None
+            if self.shm_tmp_user_vars is not None:
+                self.shm_tmp_user_vars.close()
+                self.shm_tmp_user_vars.unlink()
+                self.shm_tmp_user_vars = None
+        except:
+            print("error tidy up")
+
+#tmp_user_vars_shm
+def load_user_variables(uid):
+    user_variables = {}
+    # TODO: use shared memory
+    # get user variables out of shared memory tmp_user_vars_shm not created yet
+
+    try:
+        existing_shm_tmp_user_vars = shared_memory.SharedMemory(name='tmp_user_vars_shm_'+uid)
+        decoded_res_bytes = base64.b64decode(bytes(existing_shm_tmp_user_vars.buf))
+        user_variables = dill.loads(decoded_res_bytes)
+        existing_shm_tmp_user_vars.close()
+        #shm_tmp_user_vars.close()
+        #shm_tmp_user_vars.unlink()
+        #shm_tmp_user_vars = None
     except:
-        print("error tidy up")
+        pass
+
+    return user_variables
+
+#tmp_user_pers_shm, tmp_user_vars_shm
+def save_user_variables(globs, variables, uid):
+    #test if shared memory exists and load from it, decode
+    prior_variables = load_user_variables(uid)
+    user_variables = {k: v for k, v in globs.items() if str(k) in variables}
+    user_variables = {**prior_variables, **user_variables}
+    # TODO: use shared memory
+    # create tmp_user_vars_shm
+    if bool(user_variables):
+        res_bytes = dill.dumps(user_variables)
+        output_byte = base64.b64encode(res_bytes)
+
+        shm_tmp_user_vars= shared_memory.SharedMemory(name="tmp_user_vars_shm_"+uid ,create=True, size=len(output_byte))
+        shm_tmp_user_vars.buf[:len(output_byte)] = output_byte
+        return True
+    return False
+        #decode
+        #decoded_res_bytes = base64.b64decode(bytes(shm_tmp_user_vars.buf))
+        #decoded_output = dill.loads(decoded_res_bytes)
+        #print(decoded_output)
+
+def attach_and_write_to_shm(shm_name):
+    res_bytes = dill.dumps(True)
+    output_byte = base64.b64encode(res_bytes)
+    tmp_shm = shared_memory.SharedMemory(name=shm_name)
+    tmp_shm.buf[:len(output_byte)] = output_byte
+    sleep(3)
