@@ -7,7 +7,6 @@ source $VIRTUAL_ENV_DIR/bin/activate
 
 FULL_PATH_VIRTUAL_ENV_DIR_PYTHON="\""$(readlink -f $VIRTUAL_ENV_DIR)"/bin/python\""
 
-sed -i "s@#*\(PYTHON_EXECUTABLE=\).*@\1 $FULL_PATH_VIRTUAL_ENV_DIR_PYTHON@" scorep_jupyter_python_kernel.py
 
 pip install scorep ipykernel pandas numpy torch tqdm 
 cp scorep_jupyter_python_kernel.py userpersistency.py $VIRTUAL_ENV_DIR/lib/python3.8/site-packages/

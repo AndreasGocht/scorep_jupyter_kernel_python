@@ -3,8 +3,9 @@ from subprocess import Popen, PIPE
 import os
 import re
 import userpersistency
+import sys
 
-PYTHON_EXECUTABLE= ""
+PYTHON_EXECUTABLE = sys.executable
 
 class ScoreP_Python_Kernel(Kernel):
     implementation = 'Python and ScoreP'
