@@ -11,7 +11,9 @@ import signal
 import subprocess
 import sys
 
-PYTHON_EXECUTABLE = ""
+PYTHON_EXECUTABLE = sys.executable
+print("asdlöjkasdfljksdklfjgklsdjfg",PYTHON_EXECUTABLE)
+
 
 
 # Exception to throw when reading data from stdout/stderr of subprocess
@@ -50,15 +52,19 @@ class ScorepPythonKernel(Kernel):
     tmpUserVars = ""
 
     def __init__(self, **kwargs):
+        print("init")
         Kernel.__init__(self, **kwargs)
         uid = str(uuid.uuid4())
         self.tmpCodeFile = ".tmpCodeFile" + uid + ".py"
         self.tmpUserPers = "tmpUserPers" + uid + ".py"
         self.tmpUserVars = ".tmpUserVars" + uid
         self.userEnv["PYTHONUNBUFFERED"] = "x"
+        print("init done")
 
     def get_output_and_print(self, process2observe):
+        print("get_output_and_print")
         while True:
+            print("get_output_and_print while")
             err = b''
             output = b''
             signal.setitimer(signal.ITIMER_REAL, signal_timeout)
@@ -85,10 +91,11 @@ class ScorepPythonKernel(Kernel):
                 stream_content_stderr = {'name': 'stderr',
                                          'text': err.decode(sys.getdefaultencoding(), errors='ignore')}
                 self.send_response(self.iopub_socket, 'stream', stream_content_stderr)
+            print("get_output_and_print end while")
 
     def do_execute(self, code, silent, store_history=True, user_expressions=None,
                    allow_stdin=False):
-
+        print("do_execute")
         if code.startswith('%%scorep_env'):
             # set scorep environment variables
             scorep_vars = code.split('\n')
@@ -228,7 +235,7 @@ class ScorepPythonKernel(Kernel):
 
                 if not silent:
                     self.get_output_and_print(user_code_process)
-
+        print("do_execute return")
         return {'status': 'ok',
                 # The base class increments the execution count
                 'execution_count': self.execution_count,
@@ -237,6 +244,7 @@ class ScorepPythonKernel(Kernel):
                 }
 
     def do_shutdown(self, restart):
+        print("do_shutdown")
         if os.path.exists(self.tmpCodeFile):
             os.remove(self.tmpCodeFile)
         userpersistence.tidy_up(self.tmpUserPers, self.tmpUserVars)
@@ -246,9 +254,11 @@ class ScorepPythonKernel(Kernel):
                 }
 
     def do_clear(self):
+        print("do_clear")
         pass
 
     def do_apply(self, content, bufs, msg_id, reply_metadata):
+        print("do_apply")
         pass
 
     '''
@@ -268,5 +278,6 @@ class ScorepPythonKernel(Kernel):
 
 if __name__ == '__main__':
     from ipykernel.kernelapp import IPKernelApp
-
+    print("launch")
     IPKernelApp.launch_instance(kernel_class=ScorepPythonKernel)
+    print("done")

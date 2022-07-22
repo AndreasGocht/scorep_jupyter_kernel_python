@@ -5,7 +5,10 @@ import ast
 import shelve
 import pickle
 import glob
-from tmp_userpersistency import *
+try:
+    from tmp_userpersistency import *
+except ModuleNotFoundError:
+    pass
 
 def save_user_definitions(code):
 
