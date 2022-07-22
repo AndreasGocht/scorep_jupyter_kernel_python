@@ -2,7 +2,7 @@ from ipykernel.kernelbase import Kernel
 from subprocess import Popen, PIPE 
 import os
 import re
-import userpersistency
+from scorep_jupyter import userpersistency
 import sys
 
 PYTHON_EXECUTABLE = sys.executable
