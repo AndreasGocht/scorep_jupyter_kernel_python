@@ -1,0 +1,11 @@
+{
+    "argv": [
+        "/home/gocht/virtenv/python3.10/bin/python",
+        "-m",
+        "scorep_jupyter.kernel",
+        "{connection_file}"
+    ],
+    "display_name": "scorep-python",
+    "name": "scorep-python",
+    "language": "python"
+}
